@@ -1,0 +1,1849 @@
+---
+title: "TFM_V2"
+author: "María José Moreno Pavón"
+date: "2025-04-25"
+output:
+  word_document: default
+  pdf_document: default
+---
+
+```{r setup, include=TRUE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r libraries, message=FALSE, include=FALSE}
+library(haven)
+library(nortest)
+library(ggplot2)
+library(dplyr)
+library(tidyverse)
+library(gtsummary)
+library(gt)
+library(tidymodels)
+library(glmnet)
+library(dplyr)
+library(lmtest) # likelihood test
+library(logistf)
+library(finalfit)
+library(car)
+library(survival)
+library(survminer)
+```
+
+# Variable selection
+
+For this research, variables were carefully selected from an initial dataset containing 250 variables and 629 observations. The number of variables was then reduced to facilitate subsequent analyses. 
+
+
+```{r Loading dataset, include=FALSE}
+# First, load the dataset, a .sav file from SPSS
+library(haven)
+ENPIC_BMI_Depurada <- read_sav("ENPIC_BMI_Depurada.sav")
+
+# ENPIC_1 was created. This subset contains only the variables of interest, with most columns removed.
+ENPIC_1 <- ENPIC_BMI_Depurada[, c(-1, -5:-10, -12:-14, -16:-19, -21, -36:-57, -59,-62:-67, -69:-71, -102:-103,-106:-107, -111, -115:-116, -118:-119, -121:-122,-132:-215, -219:-250)]
+```
+
+As detailed in the material and methods section, patients who did not meet the established inclusion criteria were exclude from the analysis. These exclusion criteria included: 
+- Missing basic demographic or clinical information
+- Missing data regarding their NUTRIC score at admission
+- Missing data for C-reactive protein levels on days, one, three, and seven.
+- Patients who did not required a nutritional support for a minimum of seven days 
+
+```{r removing the patients who did not meet our inclusion criteria, include=FALSE}
+# Basic Information about the patients
+ENPIC_1 <- ENPIC_1[!is.na(ENPIC_1$SEXO) & !is.na(ENPIC_1$EDAD) & !is.na(ENPIC_1$BMI), ]
+
+# CRP
+ENPIC_1 <- ENPIC_1[!is.na(ENPIC_1$PCR1) &!is.na(ENPIC_1$PCR3) & !is.na(ENPIC_1$PCR7), ]
+
+# Nutri scores 
+ENPIC_1 <- ENPIC_1[!is.na(ENPIC_1$SAPSII) & !is.na(ENPIC_1$VGSING2) & !is.na(ENPIC_1$NUTRIC_Score), ]
+
+# we removed patients who did not need nutritional support for at least 7 days
+ENPIC_1<- ENPIC_1[ENPIC_1$TOTAL_DIAS_SN >= 7, ]
+```
+
+Once the final patient cohort was established, an initial exploratory analysis was conducted. This involved addressing missing data, and creating new variables for subsequent analysis. First, columns containing NA values were identified. Based on this, new variables were derived, and existing ones were modified as needed. 
+
+```{r Exploring missing data, include=FALSE}
+names(ENPIC_1[colSums(sapply(ENPIC_1, is.na)) > 0])
+```
+
+
+```{r variable transforming, include=FALSE}
+#### Kcal and protein variables ####
+
+# Missing values (NA) in the protein and Kcal intake variables were imputed with 0, assuming no intake when data was absent.
+
+ENPIC_1[, 25:38][is.na(ENPIC_1[, 25:38])] <- 0
+ENPIC_1[, 41:54][is.na(ENPIC_1[, 41:54])] <- 0
+
+## creating  the new variables
+
+# Mean protein first week
+ENPIC_1$protein_1w <- rowMeans(ENPIC_1[, 41:47], na.rm = TRUE)/ENPIC_1$PESOACT
+# Mean protein second week
+ENPIC_1$protein_2w <- rowMeans(ENPIC_1[, 48:54], na.rm = TRUE)/ENPIC_1$PESOACT
+# Mean Kcal second week
+ENPIC_1$Kcal_2w <- rowMeans(ENPIC_1[, 32:38], na.rm = TRUE)/ENPIC_1$PESOACT
+
+#### Death in ICU ####
+
+# First, ALTAUCI is checked for missing data 
+
+ENPIC_1$ALTAUCI3 <- ifelse(is.na(ENPIC_1$ALTAUCI3), 0, ENPIC_1$ALTAUCI3)
+
+# Now we can create the ICU_Death variable
+
+ENPIC_1$ICU_Death <- ifelse(ENPIC_1$ALTAUCI3 == 3, 1, 0)
+
+#### Patients at risk ####
+
+# This variable was created based on the Nutric_score. Patients with Nutric_score above 5 were considered at risk
+ENPIC_1$RISK_P <- ifelse(ENPIC_1$NUTRIC_Score >= 5, 1, 0)
+
+
+#### Mechanical ventilation (MV) ####
+
+# Missing values in DIASVM were imputed with 0, indicating that patients did not require (MV) if data was absent.
+
+ENPIC_1$DIASVM[is.na(ENPIC_1$DIASVM)] <- 0
+
+#### Length of stay in Hospital ####
+
+# Missing data for DIAS_HOSP ere filled with DIAS_UCI for patients still in the ICU at the end of the observational study. 
+
+ENPIC_1$DIAS_HOSP <- ifelse(is.na(ENPIC_1$DIAS_HOSP) & ENPIC_1$DIAS_UCI != 0, ENPIC_1$DIAS_UCI, ENPIC_1$DIAS_HOSP)
+
+#### Enteral nutrition before 48h ####
+# Identify patients who received enteral nutrition within the first 48 hours.
+ENPIC_1$EN_48h<- ifelse(ENPIC_1$TIPO_SN_Grupo == 1 & ENPIC_1$SN_Menos48h == 1, 1, 0)
+
+#### Categorical CRP ####
+
+# Values were categorised as "<100" mg/L or ">100" mg/L and converted to factors. 
+
+# CRP1
+ENPIC_1$NCRP1<- ifelse(ENPIC_1$PCR1 <= 100, "<100",
+                       ifelse(ENPIC_1$PCR1 > 100, ">100", NA))
+ENPIC_1$NCRP1 <- as.factor(ENPIC_1$NCRP1)
+# CRP3
+ENPIC_1$NCRP3<- ifelse(ENPIC_1$PCR3 <=100, "<100",
+                      ifelse(ENPIC_1$PCR3> 100, ">100", NA))
+ENPIC_1$NCRP3 <- as.factor((ENPIC_1$NCRP3))
+
+# CRP7
+ENPIC_1$NCRP7<- ifelse(ENPIC_1$PCR7 <=100, "<100",
+                       ifelse(ENPIC_1$PCR7> 100, ">100", NA))
+ENPIC_1$NCRP7 <- as.factor(ENPIC_1$NCRP7)
+```
+
+Once all the changes were applied, It was performed another check for NA values. Then, some variables were converted to factor type, and their labels were updated to provide more informative description. 
+
+```{r check for remaining NA values, include=FALSE}
+names(ENPIC_1[colSums(sapply(ENPIC_1, is.na)) > 0])
+```
+
+
+```{r Variable to factor conversion, include=FALSE}
+
+# Sex
+ENPIC_1$SEXO <- factor(ENPIC_1$SEXO, levels = c(1, 2), labels = c("M", "F"))
+
+# Status
+ENPIC_1$STATUS3 <- factor(ENPIC_1$STATUS3, levels = c(0, 1, 2), labels = c("Surgery", "Medical", "Trauma"))
+
+# Variables Yes/No
+variables <- c("ALCOHOL", "AHTA", "ADBTM", "ACARDIOP", "AEPOC", "AIRC", "ACIRROSIS", "AINMUNO", "ANEOPLAS", "VM", "INFRESP", "INFVIA", "NEC_NA", "TRR", "PCOMPLIG", "PDANE", "PCLOSTDIF", "PVOMITO", "PVRGM100" , "PBRONCOAS", "PISQUINT", "MUERTO28", "RISK_P", "ICU_Death", "EN_48h")
+
+for (var in variables) {
+  ENPIC_1[[var]] <- factor(ENPIC_1[[var]], levels = c(0, 1), labels = c("No", "Yes"))
+}
+
+# VGSING2
+ENPIC_1$VGSING2 <- factor(ENPIC_1$VGSING2, levels = c( 1, 2), labels = c("Good","Bad"))
+
+# Nutritional Support
+ENPIC_1$TIPO_SN_Grupo <- as.factor(ifelse(ENPIC_1$TIPO_SN_Grupo == 1, "EN",
+                               ifelse(ENPIC_1$TIPO_SN_Grupo == 2, "PN",
+                                      ifelse(ENPIC_1$TIPO_SN_Grupo == 3, "EN - PN",
+                                             ifelse(ENPIC_1$TIPO_SN_Grupo == 4, "PN - EN", NA)))))
+
+```
+
+To conclude this stage, the dataset was further reduced by deleting all irrelevant variables and labels below columns. The processed dataset was then saved to avoid repeating these steps in future analyses
+
+```{r Deleting data, include=FALSE}
+# Removing the unnecessary columns
+ENPIC_1<- ENPIC_1[, c(-4, -25:-38, -41:-54, -69,-72)]
+```
+
+
+```{r removing the labels, include=FALSE}
+# In this case, the description label is erased with a for loop
+for (x in seq_along(ENPIC_1)) {
+  attr(ENPIC_1[[x]], "label") <- NULL # accessing to attribute label of the x object and deleting it (NULL)
+}
+```
+
+Right after the data preparation, columns are renamed for clarity and ease of use in subsequent analyses.
+
+```{r renaming columns, include=FALSE}
+library(dplyr)
+ENPIC_1<- ENPIC_1 %>%
+  rename(PATIENT = PACIENTE,
+         AGE = EDAD, 
+         SEX = SEXO,
+         HTN = AHTA, # hypertension
+         DM = ADBTM, # Diabetes Miellitus
+         AMI = ACARDIOP, # Acute Myocardial infarction
+         COPD = AEPOC, #Chronic Obstructive Pulmonary Disease
+         CRF = AIRC, # Chronic Renal Failure
+         CLD = ACIRROSIS, # Chronic Liver Disease
+         IC = AINMUNO, # Immunocompromised
+         CA = ANEOPLAS, # Cancer
+         TUNS = HORASIN, # Time until Nutritional Support
+         NSGT = TIPO_SN_Grupo, # Nutritional Support Group Type
+         NSDays = TOTAL_DIAS_SN, 
+         SGA = VGSING2, # Subjective Global Assessment
+         MV = VM, # Mechanical ventilation
+         MVDays = DIASVM,
+         RTI = INFRESP, # Respiratory Tract infection
+         CRI = INFVIA, # Catheter related infection
+         VDS = NEC_NA, # Vasoactive drug support
+         RRT = TRR, # Renal replacement therapy
+         GComp = PCOMPLIG, # Gastric Complications
+         GRV = PVRGM100, #Gastric Residual Volumen
+         DEN = PDANE, #Diarrhea Enteral nutrition related 
+         VOMIT = PVOMITO, 
+         BAsp = PBRONCOAS, # Bronchoaspiration
+         MI = PISQUINT, # Mesenteric Ischemia
+         ICUDays = DIAS_UCI,
+         LOS = DIAS_HOSP, # Length of stay
+         DEATH28 = MUERTO28,
+         CRP1 = PCR1,
+         CRP3 = PCR3,
+         CRP7 = PCR7)
+
+# Saving the new ENPIC_1 dataset
+save(ENPIC_1, file="ENPIC_1.Rdata")
+```
+
+# Exploratory Analysis
+
+Subsequently the variable selection, an exploratory dataset analysis is conducted where CRP distribution and outliers were analysed with histogram and boxplots.
+
+```{r load the dataset, include=FALSE}
+# Load the pre-processed dataset (if not already loaded)
+load("ENPIC_1.Rdata")
+```
+
+
+```{r boxplot and histograms plots, echo=FALSE}
+########## --------- CRP Histograms ---------- ##############
+# Set up a 1 x 3 plot layout for histograms
+par(mfrow = c(1, 3))
+hist(ENPIC_1$CRP1, ylim = c(0, 120) ,main= "Admission", xlab= "CRP levels", col= "red")
+hist(ENPIC_1$CRP3, ylim = c(0, 120) ,main= "3rd day", xlab= "CRP levels", col = "green")
+hist(ENPIC_1$CRP7, ylim = c(0, 120) ,main= "7th day", xlab= "CRP levels", col = "blue")
+
+########## --------- CRP Boxplots ---------- ###############
+
+boxplot(ENPIC_1$CRP1, main = "Admission", ylab= "CRP levels", ylim= c(0,650), col = "red")
+boxplot(ENPIC_1$CRP3, main = "3rd day", ylab= "CRP levels", ylim = c(0,650), col = "green")
+boxplot(ENPIC_1$CRP7, main = "7th day", ylab= "CRP levels", ylim = c(0,650), col = "blue")
+
+```
+
+Then, the CRP variables were tested for normality. This involved visual inspection using Q-Q plots and statistical assessment using Lilliefors (Kolmogorov-Smirnov) test.
+
+```{r testing normal distribution, echo=FALSE}
+# Set up a 1 x 3 plot layout for histograms
+par(mfrow = c(1, 3))
+
+##### Q-Q plots
+
+# PCR1
+qqnorm(ENPIC_1$CRP1, main= "Q-Q plot PCR1")
+qqline(ENPIC_1$CRP1, col = "red")
+
+# PCR3
+qqnorm(ENPIC_1$CRP3, main = "Q-Q plot PCR3")
+qqline(ENPIC_1$CRP3, col = "red")
+
+#PCR7
+qqnorm(ENPIC_1$CRP7, main = "Q-Q plot PCR7")
+qqline(ENPIC_1$CRP7, col = "red")
+
+par(mfrow = c(1, 1))
+
+# Kolgomorov-sminorv test for normality 
+
+library(nortest)
+
+tes1<-lillie.test(ENPIC_1$CRP1)
+CRP1<- tes1$p.value
+test2<-lillie.test(ENPIC_1$CRP3)
+CRP3<- test2$p.value
+test3<-lillie.test(ENPIC_1$CRP7)
+CRP7<- test3$p.value
+
+
+# Saving the result in a table 
+tabletest<- cbind(CRP1,CRP3,CRP7) # Combining results 
+tabletest <- as.data.frame(tabletest, 
+                           row.names = "Kolmogorov-Smirnov") %>% # Transforming results into a dataframe
+  tibble::rownames_to_column( var = "Test")
+
+
+tble1<-gt(tabletest) %>% 
+  tab_header(title = md("Normal Distribution Test")) %>% 
+  tab_style( style = cell_text(weight = "bold"),
+             locations = cells_column_labels(columns = c(Test, CRP1, CRP3, CRP7))) %>% # Updated column names
+  tab_options( table_body.hlines.color = "transparent") # erasing the line between rows
+
+tble1
+
+```
+
+The histogram, boxplots, Q-Q plots, and the Kolmogorov-Smirnov test all indicated that CRP levels did not follow a normal distribution. Therefore, to assess statistical differences among these paired samples, the Friedman test was employed, followed by post-hoc comparisons.
+
+
+```{r Freadman test, echo=FALSE}
+# Preparing the data for Friedman test
+CRP<- data.frame(ENPIC_1$CRP1, ENPIC_1$CRP3, ENPIC_1$CRP7)
+
+# Friedman test
+Fried_resul <- friedman.test(as.matrix(CRP))
+print(Fried_resul)
+
+# Wilcoxon test to determine which groups are different 
+pairwise.wilcox.test(c(ENPIC_1$CRP1, ENPIC_1$CRP3, ENPIC_1$CRP7),
+                     rep(c("PCR1", "PCR3", "PCR7"), each = length(ENPIC_1$CRP1)),
+                     p.adjust.method = "bonferroni")
+```
+
+A chart was generated to compare CRP levels based in both nutritional support type and patient type at admission
+
+```{r CRP vs Nutritional support, echo=FALSE}
+# Loading necessary libraries
+library(ggplot2)
+library(tidyverse)
+
+# Reshape the daa from wide to long format for CRP variables
+df_long <- ENPIC_1 %>%
+  pivot_longer(cols = starts_with("CRP"), 
+               names_to = "Day", 
+               values_to = "CRP")
+
+# Group the data by Day and NSGT
+# Then, calculate the mean, standard deviation (sd), count (n), and standard error
+df_mean <- df_long %>%
+  group_by(Day, NSGT) %>% # Grouping by Day and Type of nutritional support 
+  summarise(Mean_CRP = mean(CRP),
+            sd = sd(CRP),
+            n = n(),
+            se = sd / sqrt(n)) 
+
+# Plot CRP evolution using ggplot function.
+ggplot(df_mean, aes(x = Day, y = Mean_CRP,  group = NSGT ,color = NSGT)) +
+  geom_line(linewidth = 1) +  # line
+  geom_point(size = 2) +  # point each measurement
+  geom_errorbar(aes(ymin = Mean_CRP - se, ymax = Mean_CRP + se), width = 0.2, linewidth = 1) + # Adding error bar 
+  facet_wrap(~ NSGT) + # Create separate plots foe each nutritional support type
+  theme_grey() + # Aply a grey theme 
+  theme(
+    plot.title = element_text(face = "bold", size = 12, hjust = 0.5), # Title in bold and centere
+    axis.ticks = element_line(colour = "grey30", linewidth = 0.2),
+    panel.grid.major = element_line(colour = "grey70", linewidth = 0.2),
+    panel.grid.minor = element_blank()) + # Remove minor grid lines
+  labs(title = "CRP evolution by Nutritional support", x = "Days", y = "CRP mean") # Descriptive labels
+
+```
+
+
+```{r Mean CRP levels by NSGT, echo=FALSE}
+# Calculate and display a table of mean CRP by NSGT
+tab<- ENPIC_1 %>%
+  group_by(NSGT) %>%
+  summarise(n = n(),
+            meanCRP1 = round(mean(CRP1),2),
+            meanCRP3 = round(mean(CRP3),2),
+            meanCRP7 = round(mean(CRP7),2)) 
+
+kableExtra::kable(tab)
+```
+
+
+```{r CRP levels by STATUS3, echo=FALSE}
+# Same code was employed
+df_mean <- df_long %>%
+  group_by(Day, STATUS3) %>% # Group by day and patient type at admission
+  summarise(Mean_CRP = mean(CRP),
+            sd = sd(CRP),
+            n = n(),
+            se = sd / sqrt(n)) 
+
+
+# Plot CRP evolution using ggplot function.
+ggplot(df_mean, aes(x = Day, y = Mean_CRP,  group = STATUS3 ,color = STATUS3)) +
+  geom_line(linewidth = 1) +  # line
+  geom_point(size = 2) +  # point each measurement
+  geom_errorbar(aes(ymin = Mean_CRP - se, ymax = Mean_CRP + se), width = 0.2, linewidth = 1) + # Adding error bar 
+  facet_wrap(~ STATUS3) + # To see each type of nutritional support separated
+  theme_grey() + # customizing the plot 
+  theme(
+    plot.title = element_text(face = "bold", size = 12, hjust = 0.5), # Title in bold and centered
+    axis.ticks = element_line(colour = "grey30", linewidth = 0.2), 
+    panel.grid.major = element_line(colour = "grey70", linewidth = 0.2),
+    panel.grid.minor = element_blank()) + 
+  labs(title = "CRP evolution by type of patient", x = "Days", y = "CRP mean") # Descriptive labels
+
+```
+
+
+```{r Table: CRP means by STATUS3, echo=FALSE}
+# Calculate and display a table of mean CRP by STATUS3
+tab<-ENPIC_1 %>% 
+  group_by(STATUS3) %>%
+  summarise(n = n(),
+            meanCRP1 = round(mean(CRP1),2),
+            meanCRP3 = round(mean(CRP3),2),
+            meanCRP7 = round(mean(CRP7),2)) 
+
+kableExtra::kable(tab)
+```
+
+### correlations 
+
+To understand the relationships between different variables, Spearman correlation analyses were performed
+```{r}
+library(psych)
+# Load the pre-processed dataset. This dataset is a version of ENPIC_1 where the variables have not been transformed into factors
+load("G:/Mi unidad/Análisis de datos TFM/ENPIC_1N.Rdata")
+
+# Defining the subsets
+a<- ENPIC_1N[, c(2:19, 42, 44)]
+b<- ENPIC_1N[, c(20:36,38, 42,44)]
+c <- ENPIC_1N[, c(39:42 , 44:50)]
+
+# Perform Spearman correlation tests for each subset
+corr_resutls <- corr.test(a, method = "spearman")
+corr_resutls1 <- corr.test(b, method = "spearman")
+corr_resutls2 <- corr.test(c, method = "spearman")
+
+
+library(corrplot)
+
+#### Plot for Subset A ####
+
+# png("corrplot_limpio.png", width = 2400, height = 1600, res = 300) # Save the correlation plot as high quality PNG image
+
+corrplot(corr_resutls$r,
+         method = "color", 
+         type = "full", # Display the full correlation matrix
+         order="hclust", # Reorder variables using hierarchical clustering
+         addgrid.col = "darkgray", 
+         tl.cex = 0.5,
+         number.cex = 0.4,
+         p.mat = corr_resutls$p,
+         sig.level = 0.05,
+         insig = "blank", # Hide non-significant correlations
+         tl.col = "black",
+         addCoef.col = "white", # Color of correlation coefficients
+         col = colorRampPalette(c("darkred","white","midnightblue"))(100)) #Color palette
+
+# dev.off() # close the PNG device
+
+
+
+#### Plot for Subset B ####
+
+# png("corrplot_limpio1.png", width = 2400, height = 1600, res = 300)
+
+corrplot(corr_resutls1$r,
+         method = "color",
+         type = "full",
+         order="hclust",
+         addgrid.col = "darkgray",
+         tl.cex = 0.5,
+         number.cex = 0.4,
+         p.mat = corr_resutls1$p,
+         sig.level = 0.05,
+         insig = "blank",
+         tl.col = "black",
+         addCoef.col = "white",
+         col = colorRampPalette(c("darkred","white","midnightblue"))(100))
+
+#dev.off()
+
+
+
+#### Plot for Subset C ####
+# png("corrplot_limpio2.png", width = 2400, height = 1600, res = 300)
+
+corrplot(corr_resutls2$r,
+         method = "color",
+         type = "full",
+         order="hclust",
+         addgrid.col = "darkgray",
+         tl.cex = 0.5,
+         number.cex = 0.4,
+         p.mat = corr_resutls2$p,
+         sig.level = 0.05,
+         insig = "blank",
+         tl.col = "black",
+         addCoef.col = "white",
+         col = colorRampPalette(c("darkred","white","midnightblue"))(100))
+
+# dev.off()
+
+
+```
+
+A comprehensive correlation plot was generated, to provide an overview of their interrelationships.
+
+```{r Overall correlation Plot, echo=FALSE}
+#png("corrplot_all.png", width = 2400, height = 1600, res = 300)
+corr_resutls <- corr.test(ENPIC_1N[,c(2:36,38:50)], method = "spearman")
+
+corrplot(corr_resutls$r,
+         method = "color",
+         type = "full",
+         order="hclust",
+         addgrid.col = "darkgray",
+         tl.cex = 0.5,
+         number.cex = 0.2,
+         p.mat = corr_resutls$p,
+         sig.level = 0.05,
+         insig = "blank",
+         tl.col = "black",
+         addCoef.col = "white",
+         col = colorRampPalette(c("darkred","white","midnightblue"))(100))
+
+# dev.off()
+
+```
+
+
+# Descriptive tables
+
+## Demographics and Clinical Features of the Overall Patients Population.
+
+This section describes the population at admission and on the seventh day. These two days were selected based on the significant differences identified between CRP1 and CRP7. The two tables were initially created independently and were subsequently merged for comprehensive presentation.
+
+```{r Baseline table, include=FALSE}
+
+# Several modifications were performed on the variables to improve their visualization in the tables.
+
+ENPIC_1<- ENPIC_1 %>%
+  mutate(SEXmale = SEX == "M")
+
+ENPIC_1 <- ENPIC_1 %>%
+  mutate( Surgery = STATUS3 == "Surgery",
+          Medical = STATUS3 == "Medical",
+          Trauma = STATUS3 == "Trauma" )
+
+ENPIC_1<- ENPIC_1 %>%
+  mutate(SGAbad = SGA == "Bad")
+
+ENPIC_1 <- ENPIC_1 %>%
+  mutate( EN = NSGT == "EN",
+          PN = NSGT == "PN",
+          EN_PN = NSGT == "EN - PN",
+          PN_EN = NSGT == "PN - EN" )
+
+# Select the variables of interest for the summary table, ensuring a specific order.
+
+ENPIC_t <- ENPIC_1[, c(
+  # Demographic characteristics and comorbidities
+  "AGE", "SEXmale", "BMI", "ALCOHOL", "DM", "HTN", "COPD", "AMI", "CLD", "CRF", "IC", "CA", "Surgery", "Medical", "Trauma",
+  # Prognosis ICU scores & nutritional scores on admission
+  "APACHEII", "SAPSII", "SOFA1", "SGAbad", "NUTRIC_Score", "RISK_P", 
+  # Characteristics of Nutritional Support
+  "TUNS", "EN_48h", "EN", "PN", "EN_PN", "PN_EN", "Kcal_14d", "gPROT_KG_d", "Kcal_7d", "protein_1w", "Kcal_2w", "protein_2w",
+  # EN-related complications
+  "GComp", "GRV","DEN", "VOMIT", "BAsp", "MI",
+  # Outcomes
+  "NCRP1", "MV", "MVDays", "VDS", "RRT", "RTI", "CRI", "ICUDays", "LOS", "ICU_Death", "DEATH28"
+)]
+
+# save(ENPIC_t, file="ENPIC_t.Rdata") # This dataset can be saved
+
+## Generate the baseline table using gtsummary
+
+library(gtsummary)
+table_t <-ENPIC_t%>%
+  tbl_summary(by=NCRP1, # sorted by NCRP1 variable. This variable indicates if the patient has high CRP concentrations
+              statistic = list( all_continuous() ~ "{mean} (± {sd})"), # Calculating the mean and standard deviation
+              digits = all_continuous() ~ 2, #  2 decimals
+              label = list( # Adding how the variables must be shown in the table 
+                AGE = "Mean age (years)",
+                SEXmale = "Sex (male)",
+                BMI = "BMI (Kg*m-2)",
+                ALCOHOL = "Alcohol",
+                DM = "Diabetes",
+                HTN = "Hypertension",
+                CLD = "Chronic Liver Disease",
+                CRF = "Chronic Renal Failure",
+                IC = "Immunosuppression",
+                CA = "Neoplasia",
+                SOFA1 = "SOFA (on admission)",
+                SGAbad = "Patient with malnutrition (SGA)",
+                RISK_P = "Patient at risk (Based on Nutric Score)",
+                TUNS = "Time of initiation of NS (h)",
+                EN_48h = "Early EN (<48h)",
+                Kcal_14d = "Mean Kcal/Kg/day* (Total)",
+                gPROT_KG_d = "Mean g protein/Kg/day (Total)",
+                Kcal_7d = "Mean Kcal/Kg/day (1º week)",
+                protein_1w = "Mean g protein/Kg/day (1º week)",
+                Kcal_2w = "Mean Kcal/Kg/day (2º week)",
+                protein_2w = "Mean g protein/Kg/day (1º week)",
+                GComp = "Any complication",
+                DEN = "Diarrhea",
+                VOMIT = "Vomiting",
+                BAsp = "Aspiration",
+                MI = "Mesenteric ischemia",
+                MV = "Mechanical ventilation",
+                MVDays = "Days on mechanical ventilation",
+                VDS = "Vasoactive drug support",
+                RRT = "RRT needs",
+                RTI = "Respiratory tract infection",
+                CRI = "Catheter-related infection",
+                ICUDays = "Mean ICU stay (days)",
+                LOS = "Mean hospital stay (days)", 
+                ICU_Death = "ICU mortality",
+                DEATH28 = "28-days mortality"
+              ) )%>% 
+  add_overall() %>% #  overall patients 
+  add_p() %>% # Adding p-value. This function uses the better statistical test 
+  bold_p() %>% # Bold p-values that are statistically significant
+  add_variable_group_header( # Adding headers to the groups 
+    header = "Type of patient",
+    variables = c("Surgery", "Medical", "Trauma")) %>%
+  modify_spanning_header(c("stat_1", "stat_2") ~ "**Baseline CRP levels in mg/L**")
+```
+
+
+```{r NCRP7 table, include=FALSE}
+# the same process is employed. The variables of interes fot the day 7 summary table are selected. 
+
+ENPIC_t <- ENPIC_1[, c(
+  # Demographic characteristics and comorbidities
+  "AGE", "SEXmale", "BMI", "ALCOHOL", "DM", "HTN", "COPD", "AMI", "CLD", "CRF", "IC", "CA", "Surgery", "Medical", "Trauma",
+  # Prognosis ICU scores & nutritional scores on admission
+  "APACHEII", "SAPSII", "SOFA1", "SGAbad", "NUTRIC_Score", "RISK_P",  
+  # Characteristics of Nutritional Support
+  "TUNS", "EN_48h", "EN", "PN", "EN_PN", "PN_EN", "Kcal_14d", "gPROT_KG_d", "Kcal_7d", "protein_1w", "Kcal_2w", "protein_2w",
+  # EN-related complications
+  "GComp", "GRV","DEN", "VOMIT", "BAsp", "MI",
+  # Outcomes - Notice that NCRP7 is selected instead of NCRP1
+  "NCRP7", "MV", "MVDays", "VDS", "RRT", "RTI", "CRI", "ICUDays", "LOS", "ICU_Death", "DEATH28"
+)]
+
+table_t7 <-ENPIC_t%>%
+  tbl_summary(by=NCRP7, # sorted by NCRP1 variable. This variable indicates if the patient has high CRP concentrations
+              statistic = list( all_continuous() ~ "{mean} (± {sd})"), # Calculating the mean and standard deviation
+              digits = all_continuous() ~ 2, # indicating 2 decimals
+              label = list( # Adding how the variables must be shown in the table 
+                AGE = "Mean age (years)",
+                SEXmale = "Sex (male)",
+                BMI = "BMI (Kg*m-2)",
+                ALCOHOL = "Alcohol",
+                DM = "Diabetes",
+                HTN = "Hypertension",
+                CLD = "Chronic Liver Disease",
+                CRF = "Chronic Renal Failure",
+                IC = "Immunosuppression",
+                CA = "Neoplasia",
+                SOFA1 = "SOFA (on admission)",
+                SGAbad = "Patient with malnutrition (SGA)",
+                RISK_P = "Patient at risk (Based on Nutric Score)",
+                TUNS = "Time of initiation of NS (h)",
+                EN_48h = "Early EN (<48h)",
+                Kcal_14d = "Mean Kcal/Kg/day* (Total)",
+                gPROT_KG_d = "Mean g protein/Kg/day (Total)",
+                Kcal_7d = "Mean Kcal/Kg/day (1º week)",
+                protein_1w = "Mean g protein/Kg/day (1º week)",
+                Kcal_2w = "Mean Kcal/Kg/day (2º week)",
+                protein_2w = "Mean g protein/Kg/day (1º week)",
+                GComp = "Any complication",
+                DEN = "Diarrhoa",
+                VOMIT = "Vomiting",
+                BAsp = "Aspiration",
+                MI = "Mesenteric ischemia",
+                MV = "Mechanical ventilation",
+                MVDays = "Days on mechanical ventilation",
+                VDS = "Vasoactive drug support",
+                RRT = "RRT needs",
+                RTI = "Respiratory tract infection",
+                CRI = "Catheter-related infection",
+                ICUDays = "Mean ICU stay (days)",
+                LOS = "Mean hospital stay (days)", 
+                ICU_Death = "ICU mortality",
+                DEATH28 = "28-days mortality"
+              ) )%>% 
+  add_p() %>%
+  bold_p() %>% 
+  add_variable_group_header( header = "Type of patient",
+                             variables = c("Surgery", "Medical", "Trauma")) %>%
+  modify_spanning_header(c("stat_1", "stat_2") ~ "**CRP levels on the seventh day in mg/L**")
+```
+
+The two independently generated tables were merged side-by-side to create a single comprehensive table. 
+
+```{r Merge the tables, echo=FALSE}
+# Merging the baseline and day 7 tables 
+tabla_comb <- tbl_merge(
+  tbls = list(table_t, table_t7), # combining the tables side-by-side
+  tab_spanner = c("**CRP on admission**", "**CRP on seventh day**") # header on each side
+) 
+
+# Several separated sections needs to be created. Consequently, gtsummary table is converted to gt table for advanced customization
+
+library(gt)
+
+tabla_gt <- tabla_comb %>% as_gt() %>%
+  # Grouping rows by headers. It is important to define the rows groups in the order you want them to appear in with the groups intended for the bottom defined first
+  tab_row_group( 
+    label = "Outcomes", # Label for the "Outcomes" row group headers
+    rows = 41:50  # The rows that belong to outcomes. 
+  ) %>%
+  tab_row_group( # The same process is employed 
+    label = "EN-related complications",
+    rows = 35:40  
+  ) %>%
+  tab_row_group(
+    label = "Characteristics of Nutritional Support",
+    rows = 23:34  
+  ) %>%
+  tab_row_group(
+    label = "Prognosis ICU scores & scores fo evaluating nutritional status on admission",
+    rows = 17:22  
+  ) %>%
+  tab_row_group(
+    label = "Demographic characteristics and comorbidities",
+    rows = 1:16 
+  ) %>%
+  
+  # Format the row group headers
+  tab_style(
+    style = list(
+      cell_text(weight = "bold", align = "center") # The row group labels are center-aligned and bolded
+    ),
+    locations = cells_row_groups() # The style is applied to the row group headers
+  ) %>% 
+  # Table formatting 
+  tab_options(
+    # Border modifications 
+    table.border.top.style = "none", # Remove the top border of the table
+    column_labels.border.top.style = "none", # Remove the top border of the   column
+    column_labels.border.bottom.style = "none", # Remove the bottom border of the column
+    table_body.hlines.style = "none", # Remove horizontal lines within the table
+    # Font
+    table.font.names = "Helvetica", 
+    data_row.padding = px(4), # 4 pixels of padding to the data rows
+    column_labels.font.weight = "bold", # Column labels in bold
+    column_labels.text_transform = "capitalize") # Capitalize column labels 
+
+# Display the final formatted table
+tabla_gt 
+```
+
+
+## EN tables
+
+Since significant differences were observed within the EN group, a separate table was generated specifically for these patients, presenting their characteristics at admission and on the seventh day, catagorised by CRP levels.
+
+Following the same procedure, a table was generated summarizing their characteristics and outcomes on the seventh day.
+
+```{r EN table baseline, include=FALSE}
+# Creating a new dataset containing only patients who received EN
+ENPIC_E <- ENPIC_1[ENPIC_1$NSGT == "EN", ]
+
+# Saving the dataset 
+# save(ENPIC_E, file="ENPIC_E.Rdata")
+
+ENPIC_E<- ENPIC_E %>%
+  mutate(SEXmale = SEX == "M")
+
+ENPIC_E <- ENPIC_E %>%
+  mutate(
+    Surgery = STATUS3 == "Surgery",
+    Medical = STATUS3 == "Medical",
+    Trauma = STATUS3 == "Trauma"
+  )
+
+ENPIC_E<- ENPIC_E %>%
+  mutate(SGAbad = SGA == "Bad")
+
+# Selecting variables of interest 
+
+ENPIC_Et <- ENPIC_E[, c(
+  # Demographic characteristics and comorbidities
+  "AGE", "SEXmale", "BMI", "ALCOHOL", "DM", "HTN", "COPD", "AMI", "CLD", "CRF", "IC", "CA", "Surgery", "Medical", "Trauma",
+  # Prognosis ICU scores & nutritional scores on admission
+  "APACHEII", "SAPSII", "SOFA1", "SGAbad", "NUTRIC_Score", "RISK_P",  
+  # Characteristics of Nutritional Support - Note that the other type of nutritional support variables have been removed because only EN patients were selected for this dataset. 
+  "TUNS", "EN_48h", "Kcal_14d", "gPROT_KG_d", "Kcal_7d", "protein_1w", "Kcal_2w", "protein_2w",
+  # EN-related complications
+  "GComp", "GRV","DEN", "VOMIT", "BAsp", "MI",
+  # Outcomes
+  "NCRP1", "MV", "MVDays", "VDS", "RRT", "RTI", "CRI", "ICUDays", "LOS", "ICU_Death", "DEATH28"
+)]
+
+# We save the new dataset
+#save(ENPIC_Et, file="ENPIC_Et.Rdata")
+
+# Generating the baseline characteristics table for EN patients using gtsummary
+
+table_Et <-ENPIC_Et%>%
+  tbl_summary(by=NCRP1, 
+              statistic = list( all_continuous() ~ "{mean} (± {sd})"), 
+              digits = all_continuous() ~ 2, 
+              label = list( 
+                AGE = "Mean age (years)",
+                SEXmale = "Sex (male)",
+                BMI = "BMI (Kg*m-2)",
+                ALCOHOL = "Alcohol",
+                DM = "Diabetes",
+                HTN = "Hypertension",
+                CLD = "Chronic Liver Disease",
+                CRF = "Chronic Renal Failure",
+                IC = "Immunosuppression",
+                CA = "Neoplasia",
+                SOFA1 = "SOFA (on admission)",
+                SGAbad = "Patient with malnutrition (SGA)",
+                RISK_P = "Patient at risk (Based on Nutric Score)",
+                TUNS = "Time of initiation of NS (h)",
+                EN_48h = "Early EN (<48h)",
+                Kcal_14d = "Mean Kcal/Kg/day* (Total)",
+                gPROT_KG_d = "Mean g protein/Kg/day (Total)",
+                Kcal_7d = "Mean Kcal/Kg/day (1º week)",
+                protein_1w = "Mean g protein/Kg/day (1º week)",
+                Kcal_2w = "Mean Kcal/Kg/day (2º week)",
+                protein_2w = "Mean g protein/Kg/day (1º week)",
+                GComp = "Any complication",
+                DEN = "Diarrhoa",
+                VOMIT = "Vomiting",
+                BAsp = "Aspiration",
+                MI = "Mesenteric ischemia",
+                MV = "Mechanical ventilation",
+                MVDays = "Days on mechanical ventilation",
+                VDS = "Vasoactive drug support",
+                RRT = "RRT needs",
+                RTI = "Respiratory tract infection",
+                CRI = "Catheter-related infection",
+                ICUDays = "Mean ICU stay (days)",
+                LOS = "Mean hospital stay (days)", 
+                ICU_Death = "ICU mortality",
+                DEATH28 = "28-days mortality"
+              ) )%>% 
+  add_p() %>% 
+  bold_p() %>% 
+  add_variable_group_header( 
+    header = "Type of patient",
+    variables = c("Surgery", "Medical", "Trauma"))%>%
+  modify_spanning_header(c("stat_1", "stat_2") ~ "**Baseline CRP levels in mg/L**")
+```
+
+
+```{r EN table on the Seventh day, include=FALSE}
+# Selecting variables of interest for the day 7 EN tables
+
+ENPIC_Et <- ENPIC_E[, c(
+  # Demographic characteristics and comorbidities
+  "AGE", "SEXmale", "BMI", "ALCOHOL", "DM", "HTN", "COPD", "AMI", "CLD", "CRF", "IC", "CA", "Surgery", "Medical", "Trauma",
+  # Prognosis ICU scores & nutritional scores on admission
+  "APACHEII", "SAPSII", "SOFA1", "SGAbad", "NUTRIC_Score", "RISK_P",  
+  # Characteristics of Nutritional Support (Type of Nutritional support is deleted because we are only checking enteral nutrition)
+  "TUNS", "EN_48h", "Kcal_14d", "gPROT_KG_d", "Kcal_7d", "protein_1w", "Kcal_2w", "protein_2w",
+  # EN-related complications
+  "GComp", "GRV","DEN", "VOMIT", "BAsp", "MI",
+  # Outcomes
+  "NCRP7", "MV", "MVDays", "VDS", "RRT", "RTI", "CRI", "ICUDays", "LOS", "ICU_Death", "DEATH28"
+)]
+
+# Generatee the day 7 characteristics table for EN patients : 
+table_Et1 <-ENPIC_Et%>%
+  tbl_summary(by=NCRP7, 
+              statistic = list( all_continuous() ~ "{mean} (± {sd})"), 
+              digits = all_continuous() ~ 2, 
+              label = list( 
+                AGE = "Mean age (years)",
+                SEXmale = "Sex (male)",
+                BMI = "BMI (Kg*m-2)",
+                ALCOHOL = "Alcohol",
+                DM = "Diabetes",
+                HTN = "Hypertension",
+                CLD = "Chronic Liver Disease",
+                CRF = "Chronic Renal Failure",
+                IC = "Immunosuppression",
+                CA = "Neoplasia",
+                SOFA1 = "SOFA (on admission)",
+                SGAbad = "Patient with malnutrition (SGA)",
+                RISK_P = "Patient at risk (Based on Nutric Score)",
+                TUNS = "Time of initiation of NS (h)",
+                EN_48h = "Early EN (<48h)",
+                Kcal_14d = "Mean Kcal/Kg/day* (Total)",
+                gPROT_KG_d = "Mean g protein/Kg/day (Total)",
+                Kcal_7d = "Mean Kcal/Kg/day (1º week)",
+                protein_1w = "Mean g protein/Kg/day (1º week)",
+                Kcal_2w = "Mean Kcal/Kg/day (2º week)",
+                protein_2w = "Mean g protein/Kg/day (1º week)",
+                GComp = "Any complication",
+                DEN = "Diarrhoa",
+                VOMIT = "Vomiting",
+                BAsp = "Aspiration",
+                MI = "Mesenteric ischemia",
+                MV = "Mechanical ventilation",
+                MVDays = "Days on mechanical ventilation",
+                VDS = "Vasoactive drug support",
+                RRT = "RRT needs",
+                RTI = "Respiratory tract infection",
+                CRI = "Catheter-related infection",
+                ICUDays = "Mean ICU stay (days)",
+                LOS = "Mean hospital stay (days)", 
+                ICU_Death = "ICU mortality",
+                DEATH28 = "28-days mortality"
+              ) )%>% 
+  add_p() %>% 
+  bold_p() %>% 
+  add_variable_group_header( 
+    header = "Type of patient",
+    variables = c("Surgery", "Medical", "Trauma"))%>%
+  modify_spanning_header(c("stat_1", "stat_2") ~ "**CRP levels in mg/L**")
+```
+
+Both tables were merged and formatted into a single comprehensive gt table. 
+
+```{r Merging tables, echo=FALSE}
+# Merge the baseline and Day 7 EN tables side-by-side
+tabla_comb1 <- tbl_merge(
+  tbls = list(table_Et, table_Et1),
+  tab_spanner = c("**CRP on admission**", "**CRP on the seventh day**")
+) 
+
+# Convert the gtsummary table to a gt table for advanced customisation 
+tabla_gtE <- tabla_comb1 %>% as_gt() %>%
+  tab_row_group( 
+    label = "Outcomes", 
+    rows = 37:46  
+  ) %>%
+  tab_row_group( 
+    label = "EN-related complications",
+    rows = 31:36  
+  ) %>%
+  tab_row_group(
+    label = "Characteristics of Nutritional Support",
+    rows = 23:30  
+  ) %>%
+  tab_row_group(
+    label = "Prognosis ICU scores & scores fo evaluating nutritional status on admission",
+    rows = 17:22  
+  ) %>%
+  tab_row_group(
+    label = "Demographic characteristics and comorbidities",
+    rows = 1:16 
+  ) %>%
+  
+  tab_style(
+    style = list(
+      cell_text(weight = "bold", align = "center")),
+    locations = cells_row_groups()
+  ) %>% 
+  
+  # Apply general table formatting options
+  tab_options(
+    # Changing the borders
+    table.border.top.style = "none",
+    column_labels.border.top.style = "none",
+    column_labels.border.bottom.style = "none",
+    table_body.hlines.style = "none",
+    # Font and padding settings
+    table.font.names = "Helvetica",
+    data_row.padding = px(4),
+    column_labels.font.weight = "bold",
+    column_labels.text_transform = "capitalize")
+
+# Display the final formatted EN-specific table
+tabla_gtE
+```
+
+## Combined EN and EN-PN Tables 
+
+This sections focuses on patients who received either EN exclusively or combination of EN-PN. Similar to previous analyses, tables were generated to describe this subpopulation at admission an on the seventh day. 
+
+```{r EN + EN-PN tables, include=FALSE}
+# Create a new dataset including patients who received EN or EN-PN
+ENPIC_EP <- ENPIC_1[ENPIC_1$NSGT == "EN" | ENPIC_1$NSGT == "EN - PN", ]
+
+# Saving the dataset 
+# save(ENPIC_EP, file="ENPIC_EP.Rdata")
+
+
+ENPIC_EP<- ENPIC_EP %>%
+  mutate(SEXmale = SEX == "M")
+
+ENPIC_EP <- ENPIC_EP %>%
+  mutate(
+    Surgery = STATUS3 == "Surgery",
+    Medical = STATUS3 == "Medical",
+    Trauma = STATUS3 == "Trauma"
+  )
+
+ENPIC_EP<- ENPIC_EP %>%
+  mutate(SGAbad = SGA == "Bad")
+
+# Select variables of interest for the baseline table 
+
+ENPIC_EPt <- ENPIC_EP[, c(
+  # Demographic characteristics and comorbidities
+  "AGE", "SEXmale", "BMI", "ALCOHOL", "DM", "HTN", "COPD", "AMI", "CLD", "CRF", "IC", "CA", "Surgery", "Medical", "Trauma",
+  # Prognosis ICU scores & nutritional scores on admission
+  "APACHEII", "SAPSII", "SOFA1", "SGAbad", "NUTRIC_Score", "RISK_P",  
+  # Characteristics of Nutritional Support - Note that the other type of nutritional support variables have been removed because only EN patients were selected for this dataset. 
+  "TUNS", "EN_48h", "Kcal_14d", "gPROT_KG_d", "Kcal_7d", "protein_1w", "Kcal_2w", "protein_2w",
+  # EN-related complications
+  "GComp", "GRV","DEN", "VOMIT", "BAsp", "MI",
+  # Outcomes
+  "NCRP1", "MV", "MVDays", "VDS", "RRT", "RTI", "CRI", "ICUDays", "LOS", "ICU_Death", "DEATH28"
+)]
+
+# Save the new dataset
+# save(ENPIC_Et, file="ENPIC_Et.Rdata")
+
+# Generate baseline characteristics using gtsummary 
+
+table_EPt <-ENPIC_EPt%>%
+  tbl_summary(by=NCRP1, 
+              statistic = list( all_continuous() ~ "{mean} (± {sd})"), 
+              digits = all_continuous() ~ 2, 
+              label = list( 
+                AGE = "Mean age (years)",
+                SEXmale = "Sex (male)",
+                BMI = "BMI (Kg*m-2)",
+                ALCOHOL = "Alcohol",
+                DM = "Diabetes",
+                HTN = "Hypertension",
+                CLD = "Chronic Liver Disease",
+                CRF = "Chronic Renal Failure",
+                IC = "Immunosuppression",
+                CA = "Neoplasia",
+                SOFA1 = "SOFA (on admission)",
+                SGAbad = "Patient with malnutrition (SGA)",
+                RISK_P = "Patient at risk (Based on Nutric Score)",
+                TUNS = "Time of initiation of NS (h)",
+                EN_48h = "Early EN (<48h)",
+                Kcal_14d = "Mean Kcal/Kg/day* (Total)",
+                gPROT_KG_d = "Mean g protein/Kg/day (Total)",
+                Kcal_7d = "Mean Kcal/Kg/day (1º week)",
+                protein_1w = "Mean g protein/Kg/day (1º week)",
+                Kcal_2w = "Mean Kcal/Kg/day (2º week)",
+                protein_2w = "Mean g protein/Kg/day (1º week)",
+                GComp = "Any complication",
+                DEN = "Diarrhoa",
+                VOMIT = "Vomiting",
+                BAsp = "Aspiration",
+                MI = "Mesenteric ischemia",
+                MV = "Mechanical ventilation",
+                MVDays = "Days on mechanical ventilation",
+                VDS = "Vasoactive drug support",
+                RRT = "RRT needs",
+                RTI = "Respiratory tract infection",
+                CRI = "Catheter-related infection",
+                ICUDays = "Mean ICU stay (days)",
+                LOS = "Mean hospital stay (days)", 
+                ICU_Death = "ICU mortality",
+                DEATH28 = "28-days mortality"
+              ) )%>% 
+  add_p() %>% 
+  bold_p() %>% 
+  add_variable_group_header( 
+    header = "Type of patient",
+    variables = c("Surgery", "Medical", "Trauma"))%>%
+  modify_spanning_header(c("stat_1", "stat_2") ~ "**Baseline CRP levels in mg/L**")
+```
+
+
+```{r EN/EN-PN table on the Seventh day, include=FALSE}
+
+# Selecting variables of the interest
+
+ENPIC_EPt <- ENPIC_EP[, c(
+  # Demographic characteristics and comorbidities
+  "AGE", "SEXmale", "BMI", "ALCOHOL", "DM", "HTN", "COPD", "AMI", "CLD", "CRF", "IC", "CA", "Surgery", "Medical", "Trauma",
+  # Prognosis ICU scores & nutritional scores on admission
+  "APACHEII", "SAPSII", "SOFA1", "SGAbad", "NUTRIC_Score", "RISK_P",  
+  # Characteristics of Nutritional Support (Type of Nutritional support is deleted because we are only checking enteral nutrition)
+  "TUNS", "EN_48h", "Kcal_14d", "gPROT_KG_d", "Kcal_7d", "protein_1w", "Kcal_2w", "protein_2w",
+  # EN-related complications
+  "GComp", "GRV","DEN", "VOMIT", "BAsp", "MI",
+  # Outcomes
+  "NCRP7", "MV", "MVDays", "VDS", "RRT", "RTI", "CRI", "ICUDays", "LOS", "ICU_Death", "DEATH28"
+)]
+
+# Generate the day 7 characteristics table: 
+
+table_EPt1 <-ENPIC_EPt%>%
+  tbl_summary(by=NCRP7, 
+              statistic = list( all_continuous() ~ "{mean} (± {sd})"), 
+              digits = all_continuous() ~ 2, 
+              label = list( 
+                AGE = "Mean age (years)",
+                SEXmale = "Sex (male)",
+                BMI = "BMI (Kg*m-2)",
+                ALCOHOL = "Alcohol",
+                DM = "Diabetes",
+                HTN = "Hypertension",
+                CLD = "Chronic Liver Disease",
+                CRF = "Chronic Renal Failure",
+                IC = "Immunosuppression",
+                CA = "Neoplasia",
+                SOFA1 = "SOFA (on admission)",
+                SGAbad = "Patient with malnutrition (SGA)",
+                RISK_P = "Patient at risk (Based on Nutric Score)",
+                TUNS = "Time of initiation of NS (h)",
+                EN_48h = "Early EN (<48h)",
+                Kcal_14d = "Mean Kcal/Kg/day* (Total)",
+                gPROT_KG_d = "Mean g protein/Kg/day (Total)",
+                Kcal_7d = "Mean Kcal/Kg/day (1º week)",
+                protein_1w = "Mean g protein/Kg/day (1º week)",
+                Kcal_2w = "Mean Kcal/Kg/day (2º week)",
+                protein_2w = "Mean g protein/Kg/day (1º week)",
+                GComp = "Any complication",
+                DEN = "Diarrhoa",
+                VOMIT = "Vomiting",
+                BAsp = "Aspiration",
+                MI = "Mesenteric ischemia",
+                MV = "Mechanical ventilation",
+                MVDays = "Days on mechanical ventilation",
+                VDS = "Vasoactive drug support",
+                RRT = "RRT needs",
+                RTI = "Respiratory tract infection",
+                CRI = "Catheter-related infection",
+                ICUDays = "Mean ICU stay (days)",
+                LOS = "Mean hospital stay (days)", 
+                ICU_Death = "ICU mortality",
+                DEATH28 = "28-days mortality"
+              ) )%>% 
+  add_p() %>% 
+  bold_p() %>% 
+  add_variable_group_header( 
+    header = "Type of patient",
+    variables = c("Surgery", "Medical", "Trauma"))%>%
+  modify_spanning_header(c("stat_1", "stat_2") ~ "**CRP levels in mg/L**")
+```
+
+```{r Merging tables, echo=FALSE}
+# Merge the baseline and day EN/EN-PN tables side-by-side
+tabla_comb1 <- tbl_merge(
+  tbls = list(table_EPt, table_EPt1),
+  tab_spanner = c("**CRP on admission**", "**CRP on the seventh day**")
+) 
+
+# Convert the gtsummary table to a gt table for customization
+tabla_gtEP <- tabla_comb1 %>% as_gt() %>%
+  tab_row_group( 
+    label = "Outcomes", 
+    rows = 37:46  
+  ) %>%
+  tab_row_group( 
+    label = "EN-related complications",
+    rows = 31:36  
+  ) %>%
+  tab_row_group(
+    label = "Characteristics of Nutritional Support",
+    rows = 23:30  
+  ) %>%
+  tab_row_group(
+    label = "Prognosis ICU scores & scores fo evaluating nutritional status on admission",
+    rows = 17:22  
+  ) %>%
+  tab_row_group(
+    label = "Demographic characteristics and comorbidities",
+    rows = 1:16 
+  ) %>%
+  
+  tab_style(
+    style = list(
+      cell_text(weight = "bold", align = "center")),
+    locations = cells_row_groups()
+  ) %>% 
+  
+  # Table formatting 
+  tab_options(
+    # Changing the borders
+    table.border.top.style = "none",
+    column_labels.border.top.style = "none",
+    column_labels.border.bottom.style = "none",
+    table_body.hlines.style = "none",
+    
+    # Font and padding settings
+    table.font.names = "Helvetica",
+    data_row.padding = px(4),
+    column_labels.font.weight = "bold",
+    column_labels.text_transform = "capitalize")
+
+# Display the final formatted combines EN/EN-PN
+tabla_gtEP
+```
+
+# Logistic Regression
+
+logistic regression was employed to assess the potential of CRP as a predictor of bad outcomes or complications. 
+
+## Univariate Logistic Regression
+
+First, CRP was evaluated as single factor of significant complications or outcomes. ENPIC_1 dataset will be split into a training and testing dataset to fit the model and determinate their predictive power.
+
+### VDS - Vasoactive Drug Support
+
+```{r univariat logistic regression for VDS, include=FALSE}
+library(tidymodels)
+set.seed(421) # sets the random seed for reproducibility of the data split
+
+# Creating a initial split of ENPIC_1, allocating 70% of the data to the training set 
+# The Strata argument ensures that the proportion of VDS outcomes is similar in both train and test sets.
+split <- initial_split(ENPIC_1, prop = 0.7, strata = VDS)
+train <- split %>%  training() # training dataset 
+test <- split %>% testing() # Testing dataset
+
+#### ----- CRP1 ----
+
+# fitting the  logistic regression model 
+model1<- glm(VDS ~ NCRP1, data=train, family = binomial)
+summary(model1)
+
+# Checking if just intercept-only model is better than the CRP model
+library(lmtest) # Load the lmtest package for likelihood ratio tests
+Modelo0<- glm(VDS ~ 1, family = binomial, data = train) #intercept-only model
+
+# Perform the likelihood ratio test
+lrtest0 <- lrtest(model1, Modelo0)
+lrtest0 # CRP model is statistically better
+
+
+### ----- CRP7 ----
+
+# Fitting a logistic regression model with CRP on day 7 as the predictor for VDS
+model2<- glm(VDS ~ NCRP7, data=train, family = binomial)
+summary(model2)
+
+# Performs  a likelihood tests
+Modelo0<- glm(VDS ~ 1, family = binomial, data = train)
+lrtest0 <- lrtest(model2, Modelo0)
+lrtest0 # The CRP model is better than the intercept-only model
+
+```
+
+```{r OR and CI table, echo=FALSE}
+# set dependent and independent variables for univariate logistic regression
+dependent <- "VDS"
+independent <- c("NCRP1", "NCRP7")
+
+# Calculate odds Ratio (ORs) and confidence intervals (CIs) from univariate logistic regression
+glmuni_VDS <- train |>
+  glmuni(dependent, independent) |>
+  fit2df(
+    explanatory_name = "Variables",
+    estimate_name = "OR",
+    estimate_suffix = " (95% CI)"
+  )
+
+# print results using gt package for better table formatting 
+glmuni_VDS |>
+  gt()
+
+```
+
+```{r predictive power of the model, echo=FALSE}
+# Assessing predictive power of the model 
+
+# loading a function to calculate ROC and AUC
+
+source("Función ROC y AUC.R")
+
+# obtaining ROC and AUC of model1
+
+result1<-Roc_analysis(model1, test, predicto = "NCRP1",resp = "VDS", model_name = "CRP1 as a predictor of VDS")
+
+# Obtaining ROC and AUC of model2
+
+result2<-Roc_analysis(model2, test, predicto = "NCRP7",resp = "VDS", model_name = "CRP7 as a predictor of VDS")
+
+# Joining the summary of both results 
+Results <- rbind(result1$summary, result2$summary)
+
+# Creates a display a nicely formatted table of the combines ROC/AUC using the 'gt' package.
+
+Results <- Results %>% gt()
+```
+
+### MI
+
+This section repeats the univariate logistic regression analyssis, this time focusing on MI as outcome. Due to the rare occurrence of MI (only 6 patients), a Firth penalised logistic regression model was employed.
+
+```{r univariate logistic regression for MI, include=FALSE}
+# The process is repeated for the MI complication
+
+set.seed(5000)
+# Note that the strata argument is MI in this case 
+split <- initial_split(ENPIC_1, prop = 0.7, strata = MI)
+train <- split %>%  training()
+test <- split %>% testing()
+
+#### ---- Firth logistic model ----
+### ---- CRP1 ----
+# Fitting the model
+# Firth penalised logistic model was fitted after obtaining excessively high OR values because only six patients were found with MI
+
+library(logistf)
+firthmodel <- logistf(MI ~ NCRP1, data = train)
+summary(firthmodel)
+
+## OR & confidence interval
+
+OR <- exp(coef(firthmodel))[2]
+IC <- exp(confint(firthmodel))[2, ]
+pvalu<- firthmodel$prob[[2]]
+
+# create a data frame to store the results for CRP1
+
+Resultfm <- data.frame(Variables = names(OR),
+                       'OR (95% CI)'  = paste0(
+                         round(OR, 2), "(",
+                         round(IC[1], 2), "-",
+                         round(IC[2], 2), ", p=",
+                         round(pvalu, 3), ")"),
+                       row.names = NULL )
+
+### ---- CRP7 ----
+
+firthmodel1 <- logistf(MI ~ NCRP7, data = train)
+summary(firthmodel1)
+
+## OR & confidence interval
+OR <- exp(coef(firthmodel1))[2]
+IC <- exp(confint(firthmodel1))[2, ]
+pvalu<- firthmodel1$prob[[2]]
+
+# Create a data frame to store the results for CRP7
+Resultfm2 <- data.frame(
+  Variables = names(OR),
+  'OR (95% CI)'  = paste0( round(OR, 2), "(", round(IC[1], 2), "-", round(IC[2], 2), ", p=", round(pvalu, 3), ")"),
+  row.names = NULL  
+)
+
+
+```
+
+The results from the Firth regression models for MI were combined with the VDS results to present a comprehensive table of odds ratio and confidence intervals. 
+
+```{r merging both tables, echo=TRUE}
+# Combining the results into a single table 
+Resultfm <- rbind(Resultfm ,Resultfm2)
+# Renaming the column to match with glmuni table
+Resultfm <- Resultfm %>% rename(`OR (95% CI)` = `OR..95..CI.`)
+
+# Combining MI and VDS tables
+mix_table<- bind_rows(Resultfm, glmuni_VDS)
+
+# Format the combined table using the gt package for improved presentation
+
+tabla_gtc <- mix_table %>% gt() %>%
+  tab_row_group( 
+    label = "Mesenteric Isquemia", 
+    rows = 1:2 ) %>%
+  tab_row_group( 
+    label = "Vasoactive drug support", 
+    rows = 3:4 ) %>%
+  tab_style(
+    style = list( cell_text(weight = "bold", align = "left")),
+    locations = cells_row_groups()) %>% 
+  
+  # Apply general table formatting options 
+  tab_options(
+    # Changing the borders
+    table.border.top.style = "none",
+    column_labels.border.top.style = "none",
+    column_labels.border.bottom.style = "none",
+    table_body.hlines.style = "none",
+    
+    # Font
+    table.font.names = "Helvetica",
+    data_row.padding = px(4),
+    column_labels.font.weight = "bold",
+    column_labels.text_transform = "capitalize")
+
+# Display the formatted tables of ORs and CIs for VDS and MI
+
+tabla_gtc
+
+```
+
+```{r Predictive power of MI models, echo=FALSE}
+# Assessing the predictive power of CRP as a predictor of MI
+
+# loading a custom function to calculate ROC and AUC
+source("Funcion ROC y AUC boot.R")
+
+
+result3<-Roc_analysis_boot(firthmodel, test, predicto = "NCRP1",resp = "MI", model_name = "CRP1 as a predictor of MI")
+
+result4<-Roc_analysis_boot(firthmodel1, test ,predicto = "NCRP7",resp = "MI", model_name = "CRP7 as a predictor of MI")
+
+# Combining results
+Results <- rbind(result1$summary,result2$summary, result3$summary, result4$summary)
+
+# Formatting the table
+Results <- Results %>% gt() %>% tab_options(
+  # Changing the borders
+  table.border.top.style = "none",
+  column_labels.border.top.style = "none",
+  column_labels.border.bottom.style = "none",
+  table_body.hlines.style = "none",
+  
+  # Font
+  table.font.names = "Helvetica",
+  data_row.padding = px(4),
+  column_labels.font.weight = "bold",
+  column_labels.text_transform = "capitalize")
+
+Results
+```
+
+#### EN patients
+
+This section present the results of logistic regression analyses specifically for patients receiving EN
+
+
+```{r Logistic regression in EN patients for VDS, include=FALSE}
+# Loading the dataset
+load("ENPIC_E.Rdata")
+
+set.seed(421) # sets the random seed for reproducibility of the data split
+
+split <- initial_split(ENPIC_E, prop = 0.7, strata = VDS)
+train <- split %>% training() # training dataset 
+test <- split %>%  testing() #testing dataset
+
+
+#Fitting the logistic regression
+modelE<- glm(VDS ~ NCRP7, data=train, family = binomial)
+summary(modelE)
+
+# Fitting the intercept-only model 
+Modelo0<- glm(VDS ~ 1, family = binomial, data = train)
+
+# Likelihood test
+lrtest0 <- lrtest(modelE, Modelo0)
+lrtest0 # the CRP model is better than the model without that predictor
+
+
+```
+
+```{r OR and CI table, echo=FALSE}
+### ---- OR & CI Table ----
+
+# set dependent and independent variables
+dependent <- "VDS"
+independent <- c("NCRP7")
+
+# save results of univariable logistic regressions
+glmuni_result <- train |>
+  glmuni(dependent, independent) |>
+  fit2df(
+    explanatory_name = "Variables",
+    estimate_name = "OR",
+    estimate_suffix = " (95% CI)"
+  )
+# print results
+glmuni_result |>
+  gt()
+
+```
+
+```{r predictive power, echo=FALSE}
+
+# Calculating ROC and AUC for EN patients 
+
+resultE<-Roc_analysis(modelE, test, predicto = "CRP7",resp = "VDS", model_name = "CRP7 as predictor of VDS")
+
+# Extract and format the summary of ROC/AUC results into 'gt' table.
+table_resultE <- resultE$summary
+table_resultE <- table_resultE %>% gt() %>% tab_options(
+  # Changing the borders
+  table.border.top.style = "none",
+  column_labels.border.top.style = "none",
+  column_labels.border.bottom.style = "none",
+  table_body.hlines.style = "none",
+  
+  # Font
+  table.font.names = "Helvetica",
+  data_row.padding = px(4),
+  column_labels.font.weight = "bold",
+  column_labels.text_transform = "capitalize")
+
+# Display the formatted table.
+table_resultE
+```
+
+## Multivariate Logistic Regression 
+
+In this section was explored the combined predictive power of CRP an other clinical variables for VDS outcomes 
+
+### VDS
+```{r Multivariate logistic regression for VDS, message=FALSE, include=FALSE}
+set.seed(50)
+
+split <- initial_split(ENPIC_1, prop = 0.7, strata = VDS)
+train <- split %>% training()
+test <- split %>%  testing()
+
+##### ------ CRP1 -------- #####
+
+# p-value = 0.2 model
+model_mult1<- glm(VDS ~ NCRP1 + COPD + AGE + STATUS3 + CA + CLD + APACHEII + SOFA1 + NUTRIC_Score + SAPSII + SGA + EN_48h + NSGT + MV + MI + RISK_P + RRT, data=train, family = binomial)
+
+# p- value < 0.05 model
+model_mult2<- glm(VDS ~ NCRP1 + COPD + STATUS3 + CLD + APACHEII + SOFA1 + NUTRIC_Score + SGA + EN_48h + NSGT + MI , data=train, family = binomial)
+
+# reduced model
+reduced_model <- glm(VDS ~ NCRP1 + CA + SOFA1 + SAPSII + MI, data = train, family = binomial)
+
+# Stepwise model
+library(MASS)
+
+Step_model <- stepAIC(model_mult1, direction = "both")
+summary(Step_model)
+
+# Comparing which model is the best with ANOVA
+
+anova(model_mult1, model_mult2, reduced_model, Step_model)
+
+library(stats)
+
+# Compare model using AUC, where lower values indicate better fit
+A1<-AIC(model_mult1, model_mult2, reduced_model, Step_model)
+print(A1)
+
+# Based on AIC and likelihood rario tests, the Step_model is selected as the best model
+
+
+```
+
+```{r stepwise model, echo=FALSE}
+# Checking multicollinearity  for the Step_model
+vif(Step_model) # All VIF values are below 2, indicating no significant multicollinearity among the predictors 
+
+# We fit firth logistic model 
+firthreduce<- logistf(VDS ~ CLD + APACHEII + SOFA1 + SGA + NSGT, family = binomial, data = train)
+
+summary(firthreduce)
+```
+
+```{r OR and CI table echo=FALSE}
+#  display OR, CI and p-values
+tbl_regression(firthreduce, exponentiate = TRUE) %>% bold_p() # exponentiate = TRUE displays ORs
+
+# Loading a custom function to calculate AUC and ROC
+source("Funcion ROC y AUC boot_mult.R")
+
+resultmult<-Roc_analysis_boot_mult(firthreduce, test,resp = "VDS", model_name = "Multivariate model for VDS (Admission)")
+
+# Saving the summary results into resultsum
+resultsum <- resultmult$summary %>% gt()
+
+# Display the table of AUC and other metrics
+resultsum
+```
+
+The multivariate logistic regression was replicated, but this time using CRP on day 7 as a predictor  
+
+```{r multivariate model CRP7, message=FALSE, include=FALSE}
+# Repeating the same process for CRP7 
+
+
+# p-value = 0.2 model
+model_mult1<- glm(VDS ~ NCRP7 + SEX + STATUS3 + IC + CLD + APACHEII + SOFA1 + TUNS + SAPSII + SGA + EN_48h + NSGT + MV + MI+ VOMIT + Kcal_7d + Kcal_14d +protein_1w + gPROT_KG_d, data=train, family = binomial)
+
+
+# p- value < 0.05 model 
+model_mult2<- glm(VDS ~ NCRP7 + STATUS3 + CLD + TUNS + SOFA1 + NUTRIC_Score  + EN_48h + NSGT + MI , data=train, family = binomial)
+
+
+# reduced model
+reduced_model <- glm(VDS ~ NCRP7 + SOFA1 + MI +protein_1w + gPROT_KG_d, data = train, family = binomial)
+
+# Stepwise model
+library(MASS)
+stepAIC(model_mult1, direction = "both")
+summary(Step_model)
+
+# Comparing which model is the best 
+anova(model_mult1, model_mult2, reduced_model, Step_model)
+A2<-AIC(model_mult1, model_mult2, reduced_model, Step_model)
+
+# Based on AIC and likelihood rario tests, the Step_model is selected as the best model
+
+```
+
+```{r stepwise model CRP7, echo=FALSE}
+# Checking multicollinearity  for the Step_model
+vif(Step_model) # All VIF values are below 2, indicating no significant multicollinearity among the predictors 
+
+#Firth penalised logistic regression is fitted 
+stefirth<-logistf(VDS ~ NCRP7 + SOFA1 + SGA + NSGT + MI + protein_1w, family = binomial, data = train)
+
+#  display OR, CI and p-values
+tbl_regression(stefirth, exponentiate = TRUE) %>% bold_p()
+```
+
+
+```{r predictive power NCRP7, echo=FALSE}
+
+source("Funcion ROC y AUC boot_mult.R")
+
+# Creates a table to display OR, CI and p-values
+resultmult2<-Roc_analysis_boot_mult(stefirth, test,resp = "VDS", model_name = "multivariate model for the seventh day")
+
+# Format the summary results into a gt table
+resultmultsum2<- resultmult2$summary %>% gt() 
+
+# Display the table
+resultmultsum2
+
+```
+
+
+### Enteral patients
+
+This section shows the results of the multivariate logistic regression analyssi specifically for patients receiving EN.
+
+```{r multivariate logistic regression for EN patients, include=FALSE}
+set.seed(421) 
+
+split <- initial_split(ENPIC_E, prop = 0.7, strata = VDS)
+train <- split %>% 
+  training()
+test <- split %>% 
+  testing()
+
+######## -------- VDS ------- ########
+##### ------ CRP7 -------- #####
+
+# p-value = 0.2 model
+model_mult1<- glm(VDS ~ NCRP7 + SEX + STATUS3 + LOS + GRV + SOFA1 + TUNS + SGA + RRT + DEN + Kcal_7d + Kcal_14d, data=train, family = binomial)
+summary(model_mult1)
+
+# p- value < 0.05 model 
+model_mult2<- glm(VDS ~ STATUS3 , data=train, family = binomial)
+summary(model_mult2)
+
+# reduced model
+reduced_model <- glm(VDS ~ SOFA1 + STATUS3 , data = train, family = binomial)
+summary(reduced_model)
+
+# Stepwise model
+library(MASS)
+stepAIC(model_mult1, direction = "both")
+
+Step_model <- stepAIC(model_mult1, direction = "both")
+summary(Step_model)
+
+# Comparing the model
+
+anova(model_mult1, model_mult2, reduced_model, Step_model)
+AIC(model_mult1, model_mult2, reduced_model, Step_model)
+
+# Based on AIC and likelihood rario tests, the Step_model is selected as the best model
+
+
+```
+
+```{r stepwise model for EN patients, echo=FALSE}
+# Checking multicollinearity  for the Step_model
+vif(Step_model) # All VIF values are below 2, indicating no significant multicollinearity among the predictors 
+
+## Fitting a firth model 
+Efirthr <- logistf(VDS ~ STATUS3 + SOFA1 + SGA, family = binomial, data = train)
+
+# Displays the ORs and CIs
+tbl_regression(Efirthr, exponentiate = TRUE) %>% bold_p()
+
+# Calculate ROC and AUC for the multivariate model predicting VDS in EN patients
+resultmult2<-Roc_analysis_boot_mult(Efirthr, test,resp = "VDS", model_name = "multivariate model for VDS")
+
+# Extract and format the summary results into gt table
+resultadose<- resultmult2$summary
+
+# Display the table of AUC and other performance metrics
+resultadose %>% gt()
+```
+
+# Survival analysis 
+
+This section present the survival analysis of ENPIC-1 dataset, focusing on the time to a specific event, such as CRP reduction below 100 mg/L
+
+## Analysis of the ENPIC_1 dataset
+
+```{r fitting the model, include=FALSE}
+# Load necessary packages for survival analysis
+library(survival)
+library(car) # For VIF
+library(survminer)
+
+######### ENPIC_1 Dataset ############
+ENPIC_1$Reduc <- ifelse(ENPIC_1$NCRP7 == "<100", 1,0)
+# p < 0.02 model
+res_cox <- coxph(Surv(NSDays, Reduc) ~ SEX + CLD + STATUS3 + APACHEII + SOFA1 + SGA + TUNS + NSGT + MV + MI + VDS + EN_48h, data=ENPIC_1, id=ENPIC_1$PATIENT)
+summary(res_cox)
+
+# p < 0.05 model
+res_cox1 <- coxph(Surv(NSDays, Reduc) ~ CLD + STATUS3 +  SOFA1  + TUNS + NSGT + EN_48h + MI + VDS, data=ENPIC_1, id=ENPIC_1$PATIENT)
+summary(res_cox1)
+
+# Reduced model
+res_cox2 <- coxph(Surv(NSDays, Reduc) ~  STATUS3 + NSGT + SEX + SGA, data=ENPIC_1, id=ENPIC_1$PATIENT)
+summary(res_cox2)
+
+# Stepwise model
+stepres_cox<-stepAIC(res_cox,
+                     direction = "both",
+)
+summary(stepres_cox)
+
+## Comparing Models
+library(lmtest)
+lrtest(res_cox, res_cox1, res_cox2, stepres_cox)
+AIC(res_cox, res_cox1, res_cox2, stepres_cox)
+
+# Stepres_cox is selected, but it appears to be identical to the reduced_model
+
+
+```
+
+```{r Hzard ratio and CI, echo=FALSE}
+tbl_regression(stepres_cox, exponentiate = TRUE) %>%  bold_p()
+```
+
+
+```{r multicolineality and proporcionality, echo=FALSE}
+# Checking multicollinearity  among predictor in the stepres_cox model
+
+print(vif(stepres_cox)) # VIF values below 2 indicate no significant multicollinearity
+
+# Proportionality assumption using ggcoxzph plots
+# These plots show scaled Shoenfeld residuals over time, helping to identify violations.
+test_res_cox<-cox.zph(stepres_cox)
+print(test_res_cox)
+# Variables and global values were greater than 0.05 suggesting that the assumption holds for the entire model
+
+# Visualize the proportionality assumption
+
+library(ggforce) # Used for additional ggplot2 functionalities
+ggcoxzph(test_res_cox, font.main = 8,
+         ggtheme = theme(
+           axis.text.x = element_text(size = 8),
+           axis.text.y = element_text(size = 5)
+         )) 
+
+# linearity assumption was not checked since the model did not include continuous variables
+
+```
+
+
+## EN patients
+
+This section details the survival analysis for EN patients, specially using Cox proportional hazards models to investigate factors associated with the reduction of CRP levels
+
+### Cox Proportional Hazards Regression
+
+```{r fitting the models, message=FALSE, include=FALSE}
+
+ENPIC_E$Reduc<-ifelse(ENPIC_E$NCRP7 == "<100", 1,0)
+
+# p < 0.02 model
+res_cox <- coxph(Surv(NSDays, Reduc) ~ SEX + STATUS3 + SOFA1 + SGA + TUNS + GRV + DEN + RRT + VDS + LOS  + Kcal_7d , data=ENPIC_E, id=ENPIC_E$PATIENT)
+summary(res_cox)
+
+# p < 0.05 model
+res_cox1 <- coxph(Surv(NSDays, Reduc) ~ STATUS3 + VDS, data=ENPIC_E, id=ENPIC_E$PATIENT)
+summary(res_cox1)
+
+# Reduced model
+res_cox2 <- coxph(Surv(NSDays, Reduc) ~  RRT + DEN + LOS + STATUS3 + GRV + SGA, data=ENPIC_E, id=ENPIC_E$PATIENT)
+summary(res_cox2)
+
+stepres_cox<-stepAIC(res_cox, direction = "both")
+summary(stepres_cox)
+```
+
+
+```{r selecting the best model EN patients, echo=FALSE}
+library(lmtest)
+lrtest(res_cox, res_cox1, res_cox2, stepres_cox)
+AIC(res_cox, res_cox1, res_cox2, stepres_cox)
+
+# Stepwise model was selected, but it was identical to the reduced_model
+```
+
+
+```{r table of the selected model, echo=FALSE}
+
+tbl_regression(stepres_cox, exponentiate = TRUE) %>%  bold_p() 
+```
+
+
+```{r assumptions, echo=FALSE}
+# # Checking multicollinearity  among predictors for stepres_cox model
+vif(stepres_cox) # VIF values below 2 indicated that no significant multicollinearity was found
+
+# Proportionality assumption
+test_res_cox<-cox.zph(stepres_cox)
+print(test_res_cox)
+# Variables and global values were greater than 0.05 suggesting that the assumption holds for the entire model
+
+# Visualize the proportionality assumption
+ggcoxzph(test_res_cox, font.main = 8,
+         ggtheme = theme(
+           axis.text.x = element_text(size = 8),
+           axis.text.y = element_text(size = 5)
+         )) 
+
+# linearity assumption
+ggcoxdiagnostics(stepres_cox, type = "martingale")
+```
+
+
+# Bibliography
+
+
+Cox Regression model <- https://www.epirhandbook.com/es/new_pages/survival_analysis.es.html#basics-of-survival-analysis
+
+https://www.emilyzabor.com/survival-analysis-in-r.html#the-cox-regression-model
+
+Graphs <- https://r-graph-gallery.com/
+
+gtsummary tables <- https://r-graph-gallery.com/367-automate-data-summary-table-with-gtsummary.html
+
+
+Regression <- https://statsandr.com/blog/binary-logistic-regression-in-r/
+
+https://www.danieldsjoberg.com/gtsummary/articles/tbl_regression.html
+
+
+
+
+
+
+
+
+
+
+
+
+
+
